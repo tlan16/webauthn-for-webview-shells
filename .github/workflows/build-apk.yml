@@ -1,0 +1,93 @@
+# Save as .github/workflows/build-apk.yml in your fork.
+# Commit your MainHook.java edits before running this workflow.
+# Uses a disposable signing key; later builds cannot update earlier installs.
+# Build process: https://github.com/cmyfqwq/webauthn-for-webview-shells/blob/master/build.ps1
+name: Build downloadable APK
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+      - name: Check out your committed changes
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Set up Java 17
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v4
+        with:
+          packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
+      - name: Build and verify APK
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $sdk = $env:ANDROID_SDK_ROOT
+          if (-not $sdk) { $sdk = $env:ANDROID_HOME }
+          if (-not $sdk) { throw 'Android SDK location is missing.' }
+          $env:ANDROID_SDK_ROOT = $sdk
+
+          # Adapt the upstream Windows script to the runner SDK location.
+          $file = Join-Path $PWD 'build.ps1'
+          $script = Get-Content $file -Raw
+          $original = '$sdk = "$env:LOCALAPPDATA\Android\Sdk"'
+          if (-not $script.Contains($original)) {
+            throw 'Unexpected build.ps1 SDK line. Use the original Windows build.ps1.'
+          }
+          $script = $script.Replace($original, '$sdk = $env:ANDROID_SDK_ROOT')
+
+          # Recommended LSPosed scope; MainHook.java must also contain these targets.
+          $script = $script.Replace(
+            '"mark.via.gp","mark.via"',
+            '"mark.via.gp","mark.via","com.microsoft.office.outlook","org.swiftapps.swiftbackup"'
+          )
+          Set-Content -Path $file -Value $script -Encoding utf8
+
+          # Always generate a fresh key. Never upload private signing material.
+          $key = Join-Path $PWD 'module.ks'
+          Remove-Item $key -Force -ErrorAction SilentlyContinue
+          $env:MODULE_KS_PASS = [guid]::NewGuid().ToString('N')
+          Write-Output "::add-mask::$env:MODULE_KS_PASS"
+          try {
+            & $file
+            if ($LASTEXITCODE -ne 0) { throw 'APK build failed.' }
+            & "$sdk\build-tools\35.0.0\apksigner.bat" verify --verbose --print-certs 'build\WebAuthn-Shell-1.0.0.apk'
+            if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
+          } finally {
+            Remove-Item $key -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:MODULE_KS_PASS -ErrorAction SilentlyContinue
+          }
+
+      - name: Upload APK for one day
+        id: upload
+        uses: actions/upload-artifact@v7
+        with:
+          name: WebAuthn-Shell-APK
+          path: build/WebAuthn-Shell-1.0.0.apk
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+
+      - name: Add download link to run summary
+        env:
+          APK_URL: ${{ steps.upload.outputs.artifact-url }}
+        run: |
+          "### APK ready" >> $env:GITHUB_STEP_SUMMARY
+          "[Download APK ZIP]($env:APK_URL) — retained for one day." >> $env:GITHUB_STEP_SUMMARY
+          "Fresh signing key per run: uninstall an older module before installing this build. The signing key is not retained." >> $env:GITHUB_STEP_SUMMARY
