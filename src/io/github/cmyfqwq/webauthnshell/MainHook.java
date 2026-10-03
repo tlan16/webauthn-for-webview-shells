@@ -52,6 +52,12 @@ public class MainHook implements IXposedHookLoadPackage {
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
+        // TEMPORARY diagnostic. Also select Bitwarden in LSPosed scope to activate.
+        // Remove Bitwarden from scope after testing; keep Outlook/Swift Backup selected.
+        if ("com.x8bit.bitwarden".equals(lpp.packageName)) {
+            BitwardenDalTest.install(lpp.classLoader);
+            return;
+        }
         if (!TARGETS.contains(lpp.packageName)) return;
         synchronized (MainHook.class) {
             if (installed) return;
