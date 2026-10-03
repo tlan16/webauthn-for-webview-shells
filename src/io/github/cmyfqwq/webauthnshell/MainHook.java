@@ -19,10 +19,13 @@ import de.robv.android.xposed.XposedBridge;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Temporary diagnostic replacement for MainHook.java.
+ * Browser-mode experiment for Outlook and Swift Backup.
  * Logs to both LSPosed and Android logcat (tag WAShell).
- * Does not log URLs, credentials, cookies, or authentication requests.
- * Uses FOR_APP only: does not bypass origin or app-domain association checks.
+ * Uses FOR_BROWSER for those two hosts; preserves Via's original FOR_APP mode.
+ * Does not hook Bitwarden, bypass DAL checks, grant Android permissions,
+ * alter privileged-app lists, or rewrite/sign credential contents.
+ * Bitwarden's native trust flow must approve any unrecognized privileged caller.
+ * The existing WebAuthnTrace observes rea.okta.com without changing responses.
  * Adapted from https://github.com/cmyfqwq/webauthn-for-webview-shells
  */
 public class MainHook implements IXposedHookLoadPackage {
@@ -34,36 +37,46 @@ public class MainHook implements IXposedHookLoadPackage {
             "org.swiftapps.swiftbackup"
     );
 
+    private static final List<String> BROWSER_TARGETS = Arrays.asList(
+            "com.microsoft.office.outlook",
+            "org.swiftapps.swiftbackup"
+    );
+    private static int requestedMode = WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_APP;
+    private static String modeLabel = "FOR_APP";
+
     private static final Set<WebSettings> SEEN = Collections.newSetFromMap(
             new WeakHashMap<WebSettings, Boolean>());
     private static final ThreadLocal<Boolean> APPLYING = new ThreadLocal<>();
     private static boolean installed;
 
     private static void info(String message) {
-        Log.i(TAG, "diag-v2 " + message);
-        XposedBridge.log("[WAShell] diag-v2 " + message);
+        Log.i(TAG, "browser-v1 " + message);
+        XposedBridge.log("[WAShell] browser-v1 " + message);
     }
 
     private static void failure(String stage, Throwable error) {
-        Log.e(TAG, "diag-v2 " + stage, error);
-        XposedBridge.log("[WAShell] diag-v2 " + stage + "\n"
+        Log.e(TAG, "browser-v1 " + stage, error);
+        XposedBridge.log("[WAShell] browser-v1 " + stage + "\n"
                 + Log.getStackTraceString(error));
     }
 
     @Override
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam lpp) {
-        // TEMPORARY diagnostic. Also select Bitwarden in LSPosed scope to activate.
-        // Remove Bitwarden from scope after testing; keep Outlook/Swift Backup selected.
-        if ("com.x8bit.bitwarden".equals(lpp.packageName)) {
-            BitwardenDalTest.install(lpp.classLoader);
-            return;
-        }
+        // Host apps only. In particular, DO NOT install anything inside Bitwarden.
         if (!TARGETS.contains(lpp.packageName)) return;
         synchronized (MainHook.class) {
             if (installed) return;
+            if (BROWSER_TARGETS.contains(lpp.packageName)) {
+                requestedMode = WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_BROWSER;
+                modeLabel = "FOR_BROWSER";
+            }
             installed = true;
         }
-        info("S1 loaded package=" + lpp.packageName + " process=" + lpp.processName);
+        info("S1 loaded package=" + lpp.packageName + " process=" + lpp.processName
+                + " requestedMode=" + modeLabel);
+        if (BROWSER_TARGETS.contains(lpp.packageName)) {
+            info("Native Android/provider authorization remains enforced; no DAL bypass installed.");
+        }
 
         // Deliberately do not call AndroidX/WebView feature detection here.
         // Package-load callbacks may run before application initialization.
@@ -124,13 +137,13 @@ public class MainHook implements IXposedHookLoadPackage {
 
             int before = WebSettingsCompat.getWebAuthenticationSupport(settings);
             if (first) info("S5 support before=" + before);
-            if (before != WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_APP) {
-                WebSettingsCompat.setWebAuthenticationSupport(settings,
-                        WebSettingsCompat.WEB_AUTHENTICATION_SUPPORT_FOR_APP);
+            if (before != requestedMode) {
+                WebSettingsCompat.setWebAuthenticationSupport(settings, requestedMode);
             }
             int after = WebSettingsCompat.getWebAuthenticationSupport(settings);
-            if (first || before != after) {
-                info("S6 support after=" + after + " (FOR_APP=1)");
+            if (first || before != after || after != requestedMode) {
+                info("S6 support after=" + after + " requested=" + modeLabel
+                        + " applied=" + (after == requestedMode));
             }
         } catch (Throwable error) {
             failure("Applying WebAuthn support failed", error);
