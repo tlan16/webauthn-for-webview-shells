@@ -1,5 +1,6 @@
 # Save as .github/workflows/build-apk.yml in your fork.
 # Commit your MainHook.java edits before running this workflow.
+# Caches only the JDK and a dedicated Android SDK directory across runs.
 # Uses a disposable signing key; later builds cannot update earlier installs.
 # Build process: https://github.com/cmyfqwq/webauthn-for-webview-shells/blob/master/build.ps1
 name: Build downloadable APK
@@ -14,6 +15,10 @@ jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 20
+    env:
+      # Keep SDK caching separate from source, build outputs, and signing keys.
+      ANDROID_HOME: ${{ runner.temp }}/webauthn-android-sdk
+      ANDROID_SDK_ROOT: ${{ runner.temp }}/webauthn-android-sdk
     defaults:
       run:
         shell: pwsh
@@ -29,11 +34,47 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache-jdk: true
 
-      - name: Set up Android SDK
+      - name: Restore Android SDK cache
+        id: android-sdk-cache
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.ANDROID_SDK_ROOT }}
+          # Bump v1 to force a refresh. Change this key when changing SDK versions.
+          key: ${{ runner.os }}-${{ runner.arch }}-android-cmdline12266719-api36-bt35.0.0-v1
+
+      - name: Install Android SDK on cache miss
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
         uses: android-actions/setup-android@v4
         with:
+          # Command-line tools 16.0; compatible with the Java 17 toolchain.
+          cmdline-tools-version: '12266719'
           packages: 'platform-tools platforms;android-36 build-tools;35.0.0'
+
+      - name: Validate Android SDK
+        run: |
+          $required = @(
+            'platforms/android-36/android.jar',
+            'build-tools/35.0.0/aapt2.exe',
+            'build-tools/35.0.0/zipalign.exe',
+            'build-tools/35.0.0/apksigner.bat',
+            'build-tools/35.0.0/lib/d8.jar'
+          )
+          foreach ($relative in $required) {
+            $file = Join-Path $env:ANDROID_SDK_ROOT $relative
+            if (-not (Test-Path $file)) {
+              throw "SDK file missing: $relative. Bump the SDK cache key suffix and rerun."
+            }
+          }
+
+      # Save before compilation so a later Java/build error doesn't waste SDK setup.
+      - name: Save Android SDK cache
+        if: steps.android-sdk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.ANDROID_SDK_ROOT }}
+          key: ${{ steps.android-sdk-cache.outputs.cache-primary-key }}
 
       - name: Build and verify APK
         run: |
@@ -87,7 +128,9 @@ jobs:
       - name: Add download link to run summary
         env:
           APK_URL: ${{ steps.upload.outputs.artifact-url }}
+          SDK_CACHE_HIT: ${{ steps.android-sdk-cache.outputs.cache-hit }}
         run: |
           "### APK ready" >> $env:GITHUB_STEP_SUMMARY
+          "Android SDK cache hit: $env:SDK_CACHE_HIT" >> $env:GITHUB_STEP_SUMMARY
           "[Download APK ZIP]($env:APK_URL) — retained for one day." >> $env:GITHUB_STEP_SUMMARY
           "Fresh signing key per run: uninstall an older module before installing this build. The signing key is not retained." >> $env:GITHUB_STEP_SUMMARY
