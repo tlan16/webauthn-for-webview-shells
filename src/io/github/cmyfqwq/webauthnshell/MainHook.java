@@ -74,8 +74,10 @@ public class MainHook implements IXposedHookLoadPackage {
                         protected void afterHookedMethod(MethodHookParam param) {
                             if (param.getThrowable() != null) return;
                             try {
-                                WebSettings settings = ((WebView) param.thisObject).getSettings();
+                                WebView view = (WebView) param.thisObject;
+                                WebSettings settings = view.getSettings();
                                 apply(settings);
+                                WebAuthnTrace.install(view);
                             } catch (Throwable error) {
                                 failure("WebView constructor callback failed", error);
                             }
