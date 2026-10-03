@@ -33,7 +33,9 @@ public class MainHook implements IXposedHookLoadPackage {
      *  APK and checking its real label — never guess from a package name). */
     private static final List<String> TARGETS = Arrays.asList(
             "mark.via.gp",           // Via GP 7.3.3 — tested, works
-            "mark.via"               // Via CN build
+            "mark.via",               // Via CN build
+            "com.microsoft.office.outlook",
+            "org.swiftapps.swiftbackup"
     );
 
     private static volatile boolean announced = false;
