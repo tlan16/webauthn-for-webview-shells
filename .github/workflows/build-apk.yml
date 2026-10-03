@@ -2,7 +2,9 @@
 # Commit your MainHook.java edits before running this workflow.
 # Versions the APK as 1.1.<run number>; downloads are raw APKs, not ZIP files.
 # Caches only the JDK and a dedicated Android SDK directory across runs.
-# Uses a disposable signing key; later builds cannot update earlier installs.
+# Requires repository secrets MODULE_KEYSTORE_B64 and MODULE_KS_PASS.
+# Reuses your persistent signing key (PKCS12, alias dsh) so later APKs can update in place.
+# Never caches or uploads the signing key; keep an offline backup.
 # Build process: https://github.com/cmyfqwq/webauthn-for-webview-shells/blob/master/build.ps1
 name: Build downloadable APK
 
@@ -27,6 +29,16 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Check signing secrets are configured
+        env:
+          MODULE_KEYSTORE_B64: ${{ secrets.MODULE_KEYSTORE_B64 }}
+          MODULE_KS_PASS: ${{ secrets.MODULE_KS_PASS }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:MODULE_KEYSTORE_B64) -or
+              [string]::IsNullOrWhiteSpace($env:MODULE_KS_PASS)) {
+            throw 'Add repository Actions secrets MODULE_KEYSTORE_B64 and MODULE_KS_PASS. A new key will NOT be generated automatically.'
+          }
 
       - name: Initialize Android SDK location
         run: |
@@ -106,6 +118,9 @@ jobs:
           Write-Output "Building version $versionName (versionCode $versionCode)"
 
       - name: Build and verify APK
+        env:
+          MODULE_KEYSTORE_B64: ${{ secrets.MODULE_KEYSTORE_B64 }}
+          MODULE_KS_PASS: ${{ secrets.MODULE_KS_PASS }}
         run: |
           $ErrorActionPreference = 'Stop'
           $sdk = $env:ANDROID_SDK_ROOT
@@ -132,14 +147,30 @@ jobs:
             '"mark.via.gp","mark.via"',
             '"mark.via.gp","mark.via","com.microsoft.office.outlook","org.swiftapps.swiftbackup"'
           )
+          # Read the signing password from the environment, not literal command-line args.
+          $script = $script.Replace(
+            '--ks-pass "pass:$signPass" --key-pass "pass:$signPass"',
+            '--ks-pass env:MODULE_KS_PASS --key-pass env:MODULE_KS_PASS'
+          )
           Set-Content -Path $file -Value $script -Encoding utf8
 
-          # Always generate a fresh key. Never upload private signing material.
+          # Restore the SAME signing identity on every run. No random-key fallback.
           $key = Join-Path $PWD 'module.ks'
-          Remove-Item $key -Force -ErrorAction SilentlyContinue
-          $env:MODULE_KS_PASS = [guid]::NewGuid().ToString('N')
-          Write-Output "::add-mask::$env:MODULE_KS_PASS"
           try {
+            if ([string]::IsNullOrWhiteSpace($env:MODULE_KEYSTORE_B64) -or
+                [string]::IsNullOrWhiteSpace($env:MODULE_KS_PASS)) {
+              throw 'Signing secrets are missing.'
+            }
+            $bytes = [Convert]::FromBase64String($env:MODULE_KEYSTORE_B64)
+            [IO.File]::WriteAllBytes($key, $bytes)
+            [Array]::Clear($bytes, 0, $bytes.Length)
+            Remove-Item Env:MODULE_KEYSTORE_B64 -ErrorAction SilentlyContinue
+
+            # Match the upstream build script's fixed alias and shared key/store password.
+            & keytool -list -keystore $key -storetype PKCS12 -storepass:env MODULE_KS_PASS -alias dsh | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Signing keystore/password/alias validation failed. Expected PKCS12 with alias dsh.'
+            }
             & $file
             if ($LASTEXITCODE -ne 0) { throw 'APK build failed.' }
             & "$sdk\build-tools\35.0.0\apksigner.bat" verify --verbose --print-certs $env:APK_PATH
@@ -147,7 +178,13 @@ jobs:
           } finally {
             Remove-Item $key -Force -ErrorAction SilentlyContinue
             Remove-Item Env:MODULE_KS_PASS -ErrorAction SilentlyContinue
+            Remove-Item Env:MODULE_KEYSTORE_B64 -ErrorAction SilentlyContinue
           }
+
+      - name: Clean up signing material
+        if: always()
+        run: |
+          Remove-Item (Join-Path $PWD 'module.ks') -Force -ErrorAction SilentlyContinue
 
       - name: Upload APK directly for one day
         id: upload
@@ -169,4 +206,4 @@ jobs:
           "Version: $env:APP_VERSION (versionCode $env:APP_VERSION_CODE)" >> $env:GITHUB_STEP_SUMMARY
           "Android SDK cache hit: $env:SDK_CACHE_HIT" >> $env:GITHUB_STEP_SUMMARY
           "[Download APK]($env:APK_URL) — retained for one day." >> $env:GITHUB_STEP_SUMMARY
-          "Fresh signing key per run: uninstall an older module before installing this build. The signing key is not retained." >> $env:GITHUB_STEP_SUMMARY
+          "Signed with your persistent repository-secret key. One uninstall is needed when moving from earlier disposable-key builds; subsequent builds can update in place while this key stays unchanged." >> $env:GITHUB_STEP_SUMMARY
