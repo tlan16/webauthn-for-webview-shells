@@ -1,5 +1,6 @@
 # Save as .github/workflows/build-apk.yml in your fork.
 # Commit your MainHook.java edits before running this workflow.
+# Versions the APK as 1.1.<run number>; downloads are raw APKs, not ZIP files.
 # Caches only the JDK and a dedicated Android SDK directory across runs.
 # Uses a disposable signing key; later builds cannot update earlier installs.
 # Build process: https://github.com/cmyfqwq/webauthn-for-webview-shells/blob/master/build.ps1
@@ -82,6 +83,28 @@ jobs:
           path: ${{ env.ANDROID_SDK_ROOT }}
           key: ${{ steps.android-sdk-cache.outputs.cache-primary-key }}
 
+      - name: Set app version for this run
+        run: |
+          $ErrorActionPreference = 'Stop'
+          # A new manual run increments GITHUB_RUN_NUMBER; reruns keep that number.
+          # Update both Android manifest fields, not just the APK filename.
+          $number = [int]$env:GITHUB_RUN_NUMBER
+          $versionName = "1.1.$number"
+          $versionCode = 10000 + $number
+          $manifestPath = Join-Path $PWD 'AndroidManifest.xml'
+          [xml]$manifest = Get-Content $manifestPath -Raw
+          $androidNs = 'http://schemas.android.com/apk/res/android'
+          [void]$manifest.DocumentElement.SetAttribute('versionName', $androidNs, $versionName)
+          [void]$manifest.DocumentElement.SetAttribute('versionCode', $androidNs, [string]$versionCode)
+          $manifest.Save($manifestPath)
+
+          $apkName = "WebAuthn-Shell-$versionName.apk"
+          "APP_VERSION=$versionName" >> $env:GITHUB_ENV
+          "APP_VERSION_CODE=$versionCode" >> $env:GITHUB_ENV
+          "APK_FILENAME=$apkName" >> $env:GITHUB_ENV
+          "APK_PATH=build/$apkName" >> $env:GITHUB_ENV
+          Write-Output "Building version $versionName (versionCode $versionCode)"
+
       - name: Build and verify APK
         run: |
           $ErrorActionPreference = 'Stop'
@@ -98,6 +121,11 @@ jobs:
             throw 'Unexpected build.ps1 SDK line. Use the original Windows build.ps1.'
           }
           $script = $script.Replace($original, '$sdk = $env:ANDROID_SDK_ROOT')
+          # Keep the build script output filename aligned with the manifest version.
+          if (-not $script.Contains('WebAuthn-Shell-1.0.0.apk')) {
+            throw 'Unexpected APK filename in build.ps1. Update the workflow filename replacement.'
+          }
+          $script = $script.Replace('WebAuthn-Shell-1.0.0.apk', $env:APK_FILENAME)
 
           # Recommended LSPosed scope; MainHook.java must also contain these targets.
           $script = $script.Replace(
@@ -114,22 +142,23 @@ jobs:
           try {
             & $file
             if ($LASTEXITCODE -ne 0) { throw 'APK build failed.' }
-            & "$sdk\build-tools\35.0.0\apksigner.bat" verify --verbose --print-certs 'build\WebAuthn-Shell-1.0.0.apk'
+            & "$sdk\build-tools\35.0.0\apksigner.bat" verify --verbose --print-certs $env:APK_PATH
             if ($LASTEXITCODE -ne 0) { throw 'APK signature verification failed.' }
           } finally {
             Remove-Item $key -Force -ErrorAction SilentlyContinue
             Remove-Item Env:MODULE_KS_PASS -ErrorAction SilentlyContinue
           }
 
-      - name: Upload APK for one day
+      - name: Upload APK directly for one day
         id: upload
         uses: actions/upload-artifact@v7
         with:
-          name: WebAuthn-Shell-APK
-          path: build/WebAuthn-Shell-1.0.0.apk
+          # v7 can upload one file directly, without a ZIP wrapper.
+          # With archive:false, the APK filename becomes the artifact name.
+          path: ${{ env.APK_PATH }}
+          archive: false
           if-no-files-found: error
           retention-days: 1
-          compression-level: 0
 
       - name: Add download link to run summary
         env:
@@ -137,6 +166,7 @@ jobs:
           SDK_CACHE_HIT: ${{ steps.android-sdk-cache.outputs.cache-hit }}
         run: |
           "### APK ready" >> $env:GITHUB_STEP_SUMMARY
+          "Version: $env:APP_VERSION (versionCode $env:APP_VERSION_CODE)" >> $env:GITHUB_STEP_SUMMARY
           "Android SDK cache hit: $env:SDK_CACHE_HIT" >> $env:GITHUB_STEP_SUMMARY
-          "[Download APK ZIP]($env:APK_URL) — retained for one day." >> $env:GITHUB_STEP_SUMMARY
+          "[Download APK]($env:APK_URL) — retained for one day." >> $env:GITHUB_STEP_SUMMARY
           "Fresh signing key per run: uninstall an older module before installing this build. The signing key is not retained." >> $env:GITHUB_STEP_SUMMARY
