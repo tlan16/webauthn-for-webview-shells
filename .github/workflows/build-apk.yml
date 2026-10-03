@@ -5,6 +5,7 @@
 # Build process: https://github.com/cmyfqwq/webauthn-for-webview-shells/blob/master/build.ps1
 name: Build downloadable APK
 
+# Manual invocation only: no push, pull_request, or schedule triggers.
 on:
   workflow_dispatch:
 
@@ -13,12 +14,9 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: windows-latest
     timeout-minutes: 20
-    env:
-      # Keep SDK caching separate from source, build outputs, and signing keys.
-      ANDROID_HOME: ${{ runner.temp }}/webauthn-android-sdk
-      ANDROID_SDK_ROOT: ${{ runner.temp }}/webauthn-android-sdk
     defaults:
       run:
         shell: pwsh
@@ -28,6 +26,14 @@ jobs:
         uses: actions/checkout@v7
         with:
           persist-credentials: false
+
+      - name: Initialize Android SDK location
+        run: |
+          # Runner environment variables are available inside a running step.
+          # GITHUB_ENV exports these values to all subsequent steps/actions.
+          $sdk = Join-Path $env:RUNNER_TEMP 'webauthn-android-sdk'
+          "ANDROID_HOME=$sdk" >> $env:GITHUB_ENV
+          "ANDROID_SDK_ROOT=$sdk" >> $env:GITHUB_ENV
 
       - name: Set up Java 17
         uses: actions/setup-java@v6
